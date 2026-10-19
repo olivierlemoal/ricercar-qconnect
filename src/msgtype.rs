@@ -34,7 +34,17 @@ pub mod msg {
 
     // Controller -> Server
     pub const CTRL_SRVR_JOIN_SESSION: i32 = 61;
+    pub const CTRL_SRVR_SET_PLAYER_STATE: i32 = 62;
     pub const CTRL_SRVR_SET_ACTIVE_RENDERER: i32 = 63;
+    pub const CTRL_SRVR_SET_VOLUME: i32 = 64;
+    pub const CTRL_SRVR_QUEUE_LOAD_TRACKS: i32 = 66;
+    pub const CTRL_SRVR_QUEUE_ADD_TRACKS: i32 = 68;
+    pub const CTRL_SRVR_QUEUE_REMOVE_TRACKS: i32 = 69;
+    pub const CTRL_SRVR_SET_LOOP_MODE: i32 = 72;
+    pub const CTRL_SRVR_MUTE_VOLUME: i32 = 73;
+    pub const CTRL_SRVR_ASK_FOR_QUEUE_STATE: i32 = 76;
+    pub const CTRL_SRVR_ASK_FOR_RENDERER_STATE: i32 = 77;
+    pub const CTRL_SRVR_SET_AUTOPLAY_MODE: i32 = 78;
 
     // Server -> Renderer
     pub const SRVR_RNDR_SET_STATE: i32 = 41;
@@ -101,6 +111,30 @@ pub mod buffer_state {
     pub const OK: i32 = 2;
     pub const ERROR: i32 = 3;
     pub const UNDERRUN: i32 = 4;
+}
+
+/// Renderer status in `SrvrCtrlRendererStateUpdated.status`.
+pub mod renderer_status {
+    pub const UNKNOWN: i32 = 0;
+    pub const ACTIVE_CONNECTED: i32 = 1;
+    pub const ACTIVE_DISCONNECTED: i32 = 2;
+    pub const INACTIVE: i32 = 3;
+}
+
+/// `DeviceCapabilities.volumeRemoteControl`.
+pub mod volume_remote_control {
+    pub const NOT_ALLOWED: i32 = 1;
+    pub const ALLOWED: i32 = 2;
+}
+
+/// `PlaybackError.errorType`.
+pub mod playback_error {
+    pub const TRACK_NOT_FOUND: i32 = 1;
+    pub const TRACK_NOT_STREAMABLE: i32 = 2;
+    pub const TRACK_DATA_INVALID: i32 = 3;
+    pub const SERVICE_ERROR: i32 = 4;
+    pub const NETWORK_ERROR: i32 = 5;
+    pub const OTHER: i32 = 100;
 }
 
 /// Loop modes (protocol values).

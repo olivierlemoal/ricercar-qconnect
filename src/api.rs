@@ -103,6 +103,14 @@ impl WsToken {
     }
 }
 
+/// A token from `qws/delegateAuth`, handed to a Qobuz Connect device.
+#[derive(Debug, Clone)]
+pub struct DelegatedToken {
+    pub jwt: String,
+    pub exp: i64,
+    pub endpoint: Option<String>,
+}
+
 pub fn now_unix_s() -> i64 {
     (now_ms() / 1000) as i64
 }
@@ -652,6 +660,38 @@ impl ApiClient {
         let endpoint = urlencoding::decode(endpoint)?.into_owned();
         let token = WsToken { jwt, exp, endpoint };
         Ok(token.is_valid().then_some(token))
+    }
+
+    /// `qws/delegateAuth`: tokens for a Qobuz Connect device to join the
+    /// account's session (LAN pairing). `q_app_id` is the device's own app
+    /// id (`get-connect-info`). Returns (`jwt_api`, `jwt_qws`).
+    pub async fn delegate_qconnect_auth(&self, q_app_id: &str) -> Result<(DelegatedToken, DelegatedToken)> {
+        let resp = self
+            .http
+            .post(format!("{}/qws/delegateAuth", self.base))
+            .headers(self.base_headers()?)
+            .header(reqwest::header::REFERER, format!("{}/", api::PLAY_ORIGIN))
+            .header(reqwest::header::ORIGIN, api::PLAY_ORIGIN)
+            .form(&[("q_app_id", q_app_id)])
+            .send()
+            .await?;
+        let resp = Self::check_json(resp).await?;
+        let token = |key: &str| -> Result<DelegatedToken> {
+            let obj = resp.get(key).ok_or_else(|| anyhow!("qws/delegateAuth: no {key}"))?;
+            let jwt = obj.get("jwt").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if jwt.is_empty() {
+                return Err(anyhow!("qws/delegateAuth: empty {key}"));
+            }
+            let endpoint = obj.get("endpoint").and_then(|v| v.as_str()).filter(|e| !e.is_empty());
+            let endpoint = endpoint.map(|e| urlencoding::decode(e).map(|d| d.into_owned())).transpose()?;
+            Ok(DelegatedToken { jwt, exp: obj.get("exp").and_then(|v| v.as_i64()).unwrap_or(0), endpoint })
+        };
+        Ok((token("jwt_api")?, token("jwt_qws")?))
+    }
+
+    /// API root, e.g. `https://www.qobuz.com/api.json/0.2`.
+    pub fn base(&self) -> &str {
+        &self.base
     }
 }
 

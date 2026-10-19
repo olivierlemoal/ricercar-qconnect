@@ -5,11 +5,14 @@
 //! item + playing state). The renderer plays the current item, advances to
 //! the next one on its own at end of track, and reports its state back with
 //! `RndrSrvrStateUpdated`.
+//!
+//! The same connection carries the controller side (`plugin::outputs`): the
+//! session forwards it every WebSocket event and sends its messages.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -33,6 +36,15 @@ const SEEK_TOLERANCE_MS: u64 = 1_500;
 struct WsConn {
     task: JoinHandle<()>,
     batch_tx: UnboundedSender<QConnectBatch>,
+}
+
+/// The controller side's access to the session's WebSocket: one connection
+/// per device uuid, so it cannot open its own.
+pub struct CtrlLink {
+    /// Every WebSocket event, inbound batches included.
+    pub events: UnboundedSender<WsEvent>,
+    /// Controller messages to send, as one batch each.
+    pub outbound: UnboundedReceiver<Vec<QConnectMessage>>,
 }
 
 /// How the device presents itself in the Qobuz app.
@@ -60,6 +72,7 @@ pub struct Session {
     /// Our renderer id in the account's session.
     renderer_id: Option<i32>,
     ws_event_tx: UnboundedSender<WsEvent>,
+    ctrl_events: UnboundedSender<WsEvent>,
     batch_counter: i32,
 
     playing_state: i32,
@@ -81,8 +94,9 @@ pub struct Session {
 }
 
 /// Run until the task is aborted. `api` must hold the user token.
-pub async fn run(cfg: SessionParams, api: Arc<Mutex<ApiClient>>, player: Player) {
+pub async fn run(cfg: SessionParams, api: Arc<Mutex<ApiClient>>, player: Player, link: CtrlLink) {
     let (ws_event_tx, mut ws_event_rx) = unbounded_channel();
+    let CtrlLink { events: ctrl_events, outbound: mut ctrl_outbound } = link;
 
     let mut session = Session {
         max_quality: cfg.quality,
@@ -94,6 +108,7 @@ pub async fn run(cfg: SessionParams, api: Arc<Mutex<ApiClient>>, player: Player)
         registered: false,
         renderer_id: None,
         ws_event_tx,
+        ctrl_events,
         batch_counter: 0,
         playing_state: playing_state::STOPPED,
         error: false,
@@ -118,6 +133,7 @@ pub async fn run(cfg: SessionParams, api: Arc<Mutex<ApiClient>>, player: Player)
     loop {
         tokio::select! {
             Some(ev) = ws_event_rx.recv() => session.on_ws_event(ev),
+            Some(messages) = ctrl_outbound.recv() => session.send_batch(messages),
             ev = session.player.event_rx.recv() => match ev {
                 Some(ev) => session.on_player_event(ev),
                 None => break,
@@ -167,6 +183,7 @@ impl Session {
     // ---------- cloud ----------
 
     fn on_ws_event(&mut self, ev: WsEvent) {
+        let _ = self.ctrl_events.send(ev.clone());
         match ev {
             // Reports wait until the server has registered us as a renderer.
             WsEvent::Connected => self.ws_connected = true,
@@ -536,8 +553,16 @@ impl Session {
     }
 
     fn send(&mut self, messages: Vec<QConnectMessage>) {
+        if !self.registered {
+            return;
+        }
+        self.send_batch(messages);
+    }
+
+    /// Controller messages only need the connection, not our registration.
+    fn send_batch(&mut self, messages: Vec<QConnectMessage>) {
         let Some(ws) = &self.ws else { return };
-        if !self.ws_connected || !self.registered {
+        if !self.ws_connected {
             return;
         }
         self.batch_counter = self.batch_counter.wrapping_add(1);

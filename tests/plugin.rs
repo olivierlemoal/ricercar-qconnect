@@ -807,6 +807,30 @@ async fn sign_in_and_out() {
 }
 
 #[tokio::test]
+async fn outputs_need_an_account_and_qobuz_tracks() {
+    let (base, _calls) = start_mock().await;
+    let dir = data_dir(None);
+    let mut host = Host::spawn(&base);
+    let init = host.initialize(&dir, json!({})).await;
+    assert_eq!(init["capabilities"]["outputs"], true);
+    // Signed out: no device, after the initialize response.
+    assert_eq!(host.notification("outputs.changed").await["params"], json!({"outputs": []}));
+    assert_eq!(host.err_code("output.select", json!({"output": "6f1c2b9e-1111-4222-8333-944455556666"})).await, -32001);
+    assert_eq!(host.err_code("output.dance", json!({"output": "x"})).await, -32601);
+
+    host.ok("auth.begin", json!({})).await;
+    host.ok("auth.complete", json!({"input": format!("http://localhost/login/callback?code_autorisation={CODE}")})).await;
+    // Checked before any device is contacted.
+    let play = json!({"output": "x", "ref": "album/abc", "start_ms": 0});
+    assert_eq!(host.err_code("output.play", play).await, -32602);
+    assert_eq!(host.err_code("output.seek", json!({"output": "x"})).await, -32602);
+    assert_eq!(host.err_code("output.next", json!({"output": "x", "ref": "radio/track/77"})).await, -32602);
+
+    host.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn settings_and_play_reports() {
     let (base, calls) = start_mock().await;
     let dir = data_dir(Some(TOKEN));

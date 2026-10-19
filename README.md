@@ -21,7 +21,13 @@ it and hands it everything Qobuz-related:
 - **play reports** (setting, on by default): plays are reported to Qobuz as
   its apps do, so they count for the artists and your history;
 - **Qobuz Connect**: the player shows up as a device in the Qobuz app (phone,
-  desktop), wherever it is, and can be controlled from the app.
+  desktop), wherever it is, and can be controlled from the app;
+- **Qobuz Connect devices as outputs**: the player can play its Qobuz
+  tracks on a Qobuz Connect device (a HEOS amplifier, a streamer, the Qobuz
+  app on a phone…), chosen like any other output. Devices on the local
+  network are found and paired by themselves. The device fetches the tracks
+  from Qobuz itself: the audio goes through neither the player nor
+  qconnect, and only Qobuz tracks play there.
 
 Implementation details: [docs/plugin.md](docs/plugin.md).
 
@@ -99,6 +105,10 @@ detail: `RUST_LOG=qconnect=debug` in the player's environment.
 - **The device does not show up in the app**: look for `registered with
   Qobuz Connect as renderer` in the log. The app must be signed in to the
   same account.
+- **A Qobuz Connect device is missing from the outputs**: it must be in the
+  Qobuz app's device list, or on the same local network, with mDNS (UDP
+  port 5353) not blocked by a firewall. Look for `Qobuz Connect device on
+  the network` in the log.
 - **`ws: no valid token`**: the account token expired or was revoked. Sign
   in again from the player.
 
@@ -118,7 +128,7 @@ cargo test live_bundle -- --ignored --nocapture   # secret extraction against th
 | `plugin/catalog.rs`, `plugin/items.rs` | `browse.*`, `library.*`, `search`, `item.get`, `favorites.set`; API responses → items |
 | `plugin/resolve.rs` | `track.resolve`: quality matched to the output, URL expiry |
 | `plugin/remote.rs` | Qobuz Connect → host: commands → `player.*`, `player.state` → events |
-| `session.rs`, `ws.rs`, `proto.rs` | Qobuz Connect renderer: WebSocket, state, the app's queue |
-| `player.rs` | Interface between the session and its output (`remote.rs`) |
+| `plugin/outputs.rs`, `controller.rs`, `lan.rs` | Qobuz Connect devices as host outputs: `output.*` → controller messages, renderer table and queue copy, mDNS discovery and LAN pairing |
+| `session.rs`, `ws.rs`, `proto.rs` | Qobuz Connect renderer: WebSocket (shared with the controller side), state, the app's queue |
 | `api.rs`, `secret.rs` | Qobuz REST API, request signing; app id, OAuth key and secret read from the web player |
 | `account.rs`, `auth.rs` | OAuth code exchange, browser redirect listener, token storage |

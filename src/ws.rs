@@ -22,8 +22,9 @@ use crate::proto::{
     QConnectBatch, QConnectMessage, Subscribe,
 };
 
-/// Events the WS client reports to the session.
-#[derive(Debug)]
+/// Events the WS client reports to the session (which forwards them to the
+/// controller side, `plugin::outputs`).
+#[derive(Debug, Clone)]
 pub enum WsEvent {
     Connected,
     Disconnected,

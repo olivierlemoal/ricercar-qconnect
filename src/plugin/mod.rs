@@ -2,12 +2,14 @@
 //! JSON-RPC on stdin/stdout.
 //!
 //! Once signed in, the plugin also joins Qobuz Connect as a renderer and
-//! drives the host player through `player.*` requests (`remote_control`).
+//! drives the host player through `player.*` requests (`remote_control`),
+//! and offers the session's other devices as host outputs (`outputs`).
 
 mod catalog;
 mod details;
 mod items;
 mod lyrics;
+mod outputs;
 mod playlists;
 mod relay;
 mod remote;
@@ -62,10 +64,11 @@ struct State {
     connect: Option<Connect>,
 }
 
-/// Running Qobuz Connect renderer.
+/// Running Qobuz Connect renderer, and controller of the other devices.
 struct Connect {
     session: AbortHandle,
     events: tokio::sync::mpsc::UnboundedSender<HostEvent>,
+    outputs: outputs::Outputs,
 }
 
 struct Plugin {
@@ -78,6 +81,8 @@ struct Plugin {
     reports: report::Reporter,
     /// Serves CMAF streams as plain FLAC files (setting `cmaf`).
     relay: relay::Relay,
+    /// `outputs.changed`.
+    publisher: Arc<outputs::Publisher>,
 }
 
 pub async fn run(api_base: Option<&str>) -> Result<()> {
@@ -101,6 +106,7 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
         formats: Formats::default(),
         reports: report::Reporter::default(),
         relay: relay::Relay::default(),
+        publisher: Arc::new(outputs::Publisher::new(out.clone())),
     });
     *plugin.api.lock().await = plugin.new_api();
     tracing::info!("plugin mode, protocol v{PROTOCOL}");
@@ -113,11 +119,15 @@ pub async fn run(api_base: Option<&str>) -> Result<()> {
         match rpc::parse(&line) {
             Incoming::Request { id, method, params } => match method.as_str() {
                 // Handled in order: nothing else makes sense before it ends.
-                "initialize" => out.respond(id, plugin.clone().initialize(params).await),
+                "initialize" => {
+                    out.respond(id, plugin.clone().initialize(params).await);
+                    plugin.publisher.open();
+                }
                 "shutdown" => {
                     out.respond(id, Ok(Value::Null));
                     break;
                 }
+                m if m.starts_with("output.") => plugin.output_request(id, m, params),
                 _ => {
                     let plugin = plugin.clone();
                     tokio::spawn(async move {
@@ -281,7 +291,7 @@ impl Plugin {
                 "auth": true, "browse": true, "search": true, "resolve": true,
                 // Always declared: whether reports go out is a setting.
                 "favorites": true, "reporting": true, "remote_control": true, "library": true,
-                "lyrics": true, "radio": true, "details": true, "playlist_edit": true
+                "lyrics": true, "radio": true, "details": true, "playlist_edit": true, "outputs": true
             },
             "settings": settings::declaration(&lang),
         }))
@@ -418,6 +428,10 @@ impl Plugin {
             (st.settings.report_playback, st.user_id, st.data_dir.clone())
         };
         let (true, Some(user_id)) = (enabled, user_id) else { return };
+        // A Qobuz Connect device reports its plays itself.
+        if self.state().connect.as_ref().is_some_and(|c| c.outputs.in_use()) {
+            return;
+        }
         let Some(reference) = p.get("ref").and_then(Value::as_str) else { return };
         if method == "playback.started" {
             let Some(events) = self.reports.started(reference, user_id) else { return };
@@ -595,21 +609,36 @@ impl Plugin {
         };
         let (player, backend) = Player::channels();
         let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (outputs, link) = outputs::Outputs::start(&params.identity.uuid, api.clone(), self.out.clone(), self.publisher.clone());
         tokio::spawn(remote::run(backend, events_rx, self.out.clone(), api.clone(), self.formats.clone()));
-        let session = tokio::spawn(session::run(params, Arc::new(tokio::sync::Mutex::new(api)), player));
+        let session = tokio::spawn(session::run(params, Arc::new(tokio::sync::Mutex::new(api)), player, link));
         let mut st = self.state();
         if st.connect.is_some() {
             session.abort(); // raced with another start
             return;
         }
-        st.connect = Some(Connect { session: session.abort_handle(), events });
+        st.connect = Some(Connect { session: session.abort_handle(), events, outputs });
     }
 
-    /// Leave Qobuz Connect. The output stops once the session is gone.
+    /// Leave Qobuz Connect. The output stops once the session is gone; no
+    /// device is offered any more.
     fn stop_connect(&self) {
         if let Some(c) = self.state().connect.take() {
             tracing::info!("leaving Qobuz Connect");
             c.session.abort();
+        }
+        self.publisher.set(vec![]);
+    }
+
+    /// `output.*`: checked here, then run in order by the controller.
+    fn output_request(&self, id: Value, method: &str, params: Value) {
+        let request = match outputs::parse(method, params) {
+            Ok(request) => request,
+            Err(e) => return self.out.respond(id, Err(e)),
+        };
+        match &self.state().connect {
+            Some(c) => c.outputs.submit(id, request),
+            None => self.out.respond(id, Err(RpcError::auth_required())),
         }
     }
 

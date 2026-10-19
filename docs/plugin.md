@@ -3,7 +3,8 @@
 qconnect is a source plugin (protocol v1): a process started by the host
 player, speaking JSON-RPC 2.0 over stdin/stdout, one JSON message per line.
 Logs go to stderr. The plugin never touches the signal: it hands the host
-stream URLs that the host plays itself.
+stream URLs that the host plays itself, or has a Qobuz Connect device fetch
+the track itself (outputs, below).
 
 ```
 host ──(JSON-RPC over stdin/stdout)──► qconnect plugin
@@ -12,13 +13,14 @@ host ──(JSON-RPC over stdin/stdout)──► qconnect plugin
                                          ├─ search        → catalog/search
                                          ├─ item.get      → track/album/artist/playlist get
                                          ├─ track.resolve → track/getFileUrl
-                                         └─ player.*  ◄── Qobuz Connect (remote_control)
+                                         ├─ player.*  ◄── Qobuz Connect (remote_control)
+                                         └─ output.*  ──► Qobuz Connect devices (outputs)
 host ──(HTTP)──► Qobuz CDN   (the stream never goes through qconnect)
 ```
 
 Advertised capabilities: `auth`, `browse`, `search`, `resolve`,
 `favorites`, `reporting`, `remote_control`, `library`, `lyrics`, `radio`,
-`details`, `playlist_edit`.
+`details`, `playlist_edit`, `outputs`.
 
 The plugin never writes the account's e-mail address to its log (stderr)
 nor to the account it reports to the host: hosts keep both, in their logs
@@ -426,6 +428,81 @@ play/pause state. It also produces these events:
   `player.play`, before the track has started, is ignored: some hosts report
   it while they replace the queue.
 
+## Qobuz Connect outputs (`plugin/outputs.rs`)
+
+The session's other devices (a Marantz or Denon HEOS amplifier, a
+Bluesound streamer, the Qobuz app on a phone…) are offered to the host as
+outputs. The host hands the plugin its Qobuz track refs, and the plugin
+drives the device as the Qobuz apps do, as a Qobuz Connect controller: the
+device fetches the track from Qobuz and decodes it itself; nothing goes
+through the host or qconnect. The controller messages travel over the
+session's WebSocket (one connection per device id).
+
+**Discovery.** `outputs.changed` lists, by device uuid:
+- the session's renderers (`SrvrCtrlAddRenderer`, `UpdateRenderer`,
+  `RemoveRenderer`), except qconnect's own;
+- devices announcing `_qobuz-connect._tcp` on the local network (mDNS) that
+  are not in the session yet. The plugin reads their TXT `device_uuid`,
+  `sdk_version` (0.9.5 at least, or not numeric) and `path`, then `GET
+  get-display-info` and `get-connect-info` on the device.
+
+Each output: `id` = device uuid (lowercase, hyphenated), `name` = its
+name, `detail` = "brand model" (absent if unknown), `badge` = "Qobuz
+Connect". The list is `[]` signed
+out. After a reconnection, renderers stay listed for 5 s while the server
+announces them again.
+
+**Pairing.** A device that is only on the LAN is paired when selected:
+`POST qws/delegateAuth` (form `q_app_id` = the device's `app_id`) gives
+`jwt_api` and `jwt_qws`, then `POST connect-to-qconnect` to the device:
+`{session_id, jwt_api, jwt_qconnect, become_active: true}`. The device then
+joins the session by itself; the plugin waits for it (20 s).
+
+| Host request | To the Qobuz Connect server |
+|---|---|
+| `output.select` | Pairing if needed, `SetActiveRenderer` (63), wait for `ActiveRendererChanged` (10 s, error otherwise), `AskForRendererState` (77) |
+| `output.release` | `SetPlayerState` stopped (62), then `SetActiveRenderer` back to qconnect's own renderer |
+| `output.play {ref, start_ms}` | `SetAutoplayMode` off (78) and `SetLoopMode` off (72) when on, `QueueLoadTracks` (66) `[track]`, wait for `QueueTracksLoaded` (91) and its queue item id, `SetPlayerState {playing, start_ms, item}` |
+| `output.next {ref}` | `QueueAddTracks` (68) `[track]` unless it already follows, then `QueueRemoveTracks` (69) for every other item but the current one |
+| `output.pause`, `output.resume` | `SetPlayerState` with the playing state only |
+| `output.stop` | `SetPlayerState {stopped, position, item}` |
+| `output.seek {ms}` | `SetPlayerState {position, item}`, no playing state |
+| `output.volume {percent?, muted?}` | `SetVolume` (64), `MuteVolume` (73); skipped when the device refuses remote volume (`volumeRemoteControl` = 1) |
+
+- **Remote queue.** It stays `[current, next]`: the device moves on to the
+  next track by itself (gapless) and stops after the last one ricercar gave
+  it. Autoplay and repeat would play past it, so they are turned off.
+- **Queue copy.** `QueueState` (90, asked with `AskForQueueState` after
+  each join), `QueueTracksLoaded`, `Added`, `Inserted`, `Removed`,
+  `Reordered`, `Cleared` and the autoplay messages keep a copy: version,
+  queue item id → track id. Queue messages carry that version and a fresh
+  action uuid, which the answer echoes. A refusal (`QueueError`, 88) asks
+  for the queue again and retries once.
+- **Requests** run one at a time, in order.
+- Only `track/<id>` refs are accepted (`-32602` otherwise).
+
+**`output.state`** comes from `RendererStateUpdated` (82, every 2 s or so),
+`VolumeChanged` (87) and `VolumeMuted` (98); it is sent on every change and
+every second while playing, the position extrapolated in between:
+- `status`: `loading` from `output.play` until the device reports that item
+  playing or paused (30 s at most); then its playing state: `playing`,
+  `paused`, else `stopped`. `stopped` too when another device became the
+  active one;
+- `ref`: `track/<id>` of the device's queue item, from the queue copy;
+- `error`: a `PlaybackError` on the current item, or a buffer state
+  `ERROR`;
+- a device that rewinds or drops the item when it reaches the end is
+  reported stopped on the last track, at its last position, so the host
+  sees the end of the track.
+
+While an output is selected, the plugin sends no play reports: the device
+reports its plays itself.
+
+**Not verified on a device** (the protocol comes from other controllers):
+how a HEOS amplifier reports the end of its queue, whether it plays an
+appended track gaplessly, whether it reports `PlaybackError`, and how long
+it takes to join after pairing.
+
 ## Tests
 
 `tests/plugin.rs` runs `qconnect plugin --api-base <mock>` (hidden option)
@@ -442,9 +519,14 @@ Covered:
 - playlist edits, and refusal on a playlist the account does not own;
 - catalogue, `library.*`, `home` shelves, mixes, Discover shelves, search
   groups, `track.resolve` matched to the output, errors;
+- outputs: the empty list signed out, requests checked before any device
+  is contacted;
 - the account's e-mail never appears in the log.
 
-`plugin/remote.rs` has its own tests for the command translation.
+`plugin/remote.rs` has its own tests for the command translation;
+`controller.rs`, `lan.rs` and `plugin/outputs.rs` for the controller
+messages' wire layout, the queue copy, the renderer table, the output list
+and the `output.state` mapping.
 
 ## Risks
 

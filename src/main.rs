@@ -2,6 +2,8 @@ mod account;
 mod api;
 mod auth;
 mod config;
+mod controller;
+mod lan;
 mod msgtype;
 mod player;
 mod plugin;
