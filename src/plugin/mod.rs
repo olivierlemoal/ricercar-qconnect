@@ -365,12 +365,12 @@ impl Plugin {
                     }
                     api.clone()
                 };
-                let (output, cmaf) = {
+                let (output, cmaf, cap) = {
                     let st = self.state();
-                    (st.output.clone(), st.settings.cmaf)
+                    (st.output.clone(), st.settings.cmaf, st.settings.quality)
                 };
                 let relay = cmaf.then_some(&self.relay);
-                let (result, resolved, report) = resolve::resolve(&api, &p.reference, &output, relay).await?;
+                let (result, resolved, report) = resolve::resolve(&api, &p.reference, &output, relay, cap).await?;
                 self.formats.lock().unwrap_or_else(|e| e.into_inner()).insert(resolved.track_id, resolved);
                 self.reports.resolved(resolved.track_id, resolved.format_id, report.blob, report.duration_s);
                 Ok(result)
@@ -595,7 +595,7 @@ impl Plugin {
         };
         let (host_name, quality) = {
             let st = self.state();
-            (st.host_name.clone(), st.output.max_quality())
+            (st.host_name.clone(), st.output.max_quality().min(st.settings.quality))
         };
         let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
         let hostname = hostname.trim();
