@@ -43,12 +43,13 @@ subscription.
 ## Settings
 
 Declared in the `initialize` result (`settings`), labelled in the host's
-language. Both apply without restarting the plugin (`settings.changed`).
+language. All apply without restarting the plugin (`settings.changed`).
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `report_playback` | bool | `true` | Report plays to Qobuz (below) |
 | `cmaf` | bool | `false` | Fetch streams as encrypted CMAF segments, decrypted locally (see Resolution) |
+| `quality` | choice | `hires-192` | Highest quality streamed: `hires-192`, `hires-96`, `lossless`, `mp3` (see Resolution) |
 
 Values of unknown keys, or of the wrong type, are ignored; missing keys
 take their default.
@@ -265,6 +266,10 @@ hours, so the API is not asked again meanwhile.
 - `max_rate ≥ 176400`: `hires-192`;
 - `≥ 88200`: `hires-96`;
 - otherwise, or `max_bits < 24`: `lossless`.
+
+The `quality` setting caps it. `mp3` always uses `track/getFileUrl`, even
+with `cmaf` on (CMAF carries FLAC only). The Qobuz Connect device
+advertises the capped quality when its session starts.
 
 **Fallback:**
 - If the stream is not played natively (rate missing from `rates`, or above

@@ -75,7 +75,8 @@ enabled = true
 
 Quality follows the player's output: 192 kHz if it goes up to 176.4 kHz or
 more, 96 kHz from 88.2 kHz, CD quality otherwise (and also for a DAC limited
-to 16 bits). It also depends on your subscription.
+to 16 bits). It also depends on your subscription. The "Maximum quality"
+setting caps it (down to MP3, to save bandwidth).
 
 ## Data
 

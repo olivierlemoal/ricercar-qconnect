@@ -4,6 +4,20 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::config::Quality;
+
+/// Values of the `quality` setting.
+const QUALITIES: [(&str, Quality); 4] = [
+    ("hires-192", Quality::HiRes192),
+    ("hires-96", Quality::HiRes96),
+    ("lossless", Quality::Lossless),
+    ("mp3", Quality::Mp3),
+];
+
+fn quality_key(q: Quality) -> &'static str {
+    QUALITIES.iter().find(|(_, v)| *v == q).map_or("hires-192", |(k, _)| k)
+}
+
 /// Values in effect.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -13,11 +27,13 @@ pub struct Settings {
     /// Fetch streams as encrypted CMAF segments (`file/url`), decrypted by a
     /// local relay, instead of plain `track/getFileUrl` URLs.
     pub cmaf: bool,
+    /// Highest quality to stream, below what the output plays natively.
+    pub quality: Quality,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { report_playback: true, cmaf: false }
+        Settings { report_playback: true, cmaf: false, quality: Quality::HiRes192 }
     }
 }
 
@@ -33,6 +49,9 @@ impl Settings {
         }
         if let Some(on) = flag(values, "cmaf") {
             s.cmaf = on;
+        }
+        if let Some(q) = values.get("quality").and_then(Value::as_str).and_then(|v| QUALITIES.iter().find(|(k, _)| *k == v)) {
+            s.quality = q.1;
         }
         s
     }
@@ -71,6 +90,25 @@ pub fn declaration(lang: &str) -> Value {
                  par défaut. S'applique à partir du titre suivant."
             ),
         },
+        {
+            "key": "quality", "type": "choice", "default": quality_key(d.quality),
+            "section": t("Playback", "Lecture"),
+            "label": t("Maximum quality", "Qualité maximale"),
+            "description": t(
+                "Highest quality streamed. The output may still lower it to what it plays natively. \
+                 MP3 uses plain streaming even when encrypted streaming is on. Applies from the next \
+                 track.",
+                "Qualité la plus haute diffusée. La sortie peut encore l'abaisser à ce qu'elle lit \
+                 nativement. Le MP3 passe par la lecture classique même si la lecture chiffrée est \
+                 activée. S'applique à partir du titre suivant."
+            ),
+            "options": [
+                {"value": "hires-192", "label": t("Hi-Res up to 192 kHz", "Hi-Res jusqu'à 192 kHz")},
+                {"value": "hires-96", "label": t("Hi-Res up to 96 kHz", "Hi-Res jusqu'à 96 kHz")},
+                {"value": "lossless", "label": t("CD (16-bit / 44.1 kHz FLAC)", "CD (FLAC 16 bits / 44,1 kHz)")},
+                {"value": "mp3", "label": "MP3 320 kbit/s"},
+            ],
+        },
     ])
 }
 
@@ -82,10 +120,12 @@ mod tests {
     fn values_fall_back_to_defaults() {
         assert_eq!(Settings::from_values(None), Settings::default());
         assert!(Settings::default().report_playback && !Settings::default().cmaf);
-        let s = Settings::from_values(Some(&json!({"report_playback": false, "cmaf": true, "gone": 3})));
-        assert_eq!(s, Settings { report_playback: false, cmaf: true });
-        let s = Settings::from_values(Some(&json!({"report_playback": "no"})));
+        assert_eq!(Settings::default().quality, Quality::HiRes192);
+        let s = Settings::from_values(Some(&json!({"report_playback": false, "cmaf": true, "quality": "mp3", "gone": 3})));
+        assert_eq!(s, Settings { report_playback: false, cmaf: true, quality: Quality::Mp3 });
+        let s = Settings::from_values(Some(&json!({"report_playback": "no", "quality": "flac"})));
         assert!(s.report_playback, "a value of the wrong type is ignored");
+        assert_eq!(s.quality, Quality::HiRes192, "an unknown choice is ignored");
     }
 
     #[test]
@@ -95,11 +135,13 @@ mod tests {
         assert_eq!(fr[0]["label"], "Signaler les écoutes à Qobuz");
         assert_eq!(en[0]["label"], "Report plays to Qobuz");
         for entry in fr.as_array().unwrap() {
-            assert_eq!(entry["type"], "bool");
-            assert!(entry["default"].is_boolean() && entry["description"].is_string());
+            assert!(entry["description"].is_string());
             assert!(entry.get("restart").is_none(), "applied without restarting the plugin");
         }
         assert_eq!(fr[0]["default"], true);
         assert_eq!(fr[1]["default"], false);
+        assert_eq!(fr[2]["default"], "hires-192");
+        let values: Vec<&str> = fr[2]["options"].as_array().unwrap().iter().map(|o| o["value"].as_str().unwrap()).collect();
+        assert_eq!(values, QUALITIES.map(|(k, _)| k), "every choice parses back");
     }
 }

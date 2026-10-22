@@ -718,6 +718,13 @@ async fn catalogue_and_resolve() {
     assert_eq!(r["duration_ms"], 185_000);
     assert_eq!(r["replaygain"], json!({"track_gain": -3.5, "track_peak": 0.9}));
 
+    // The quality setting caps what the DAC would take.
+    let quality = |q: &str| json!({"jsonrpc": "2.0", "method": "settings.changed", "params": {"settings": {"quality": q}}});
+    host.send(quality("lossless")).await;
+    host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
+    assert_eq!(format_ids(&calls), ["6"], "capped to CD quality");
+    host.send(quality("hires-192")).await;
+
     // Switch to a 48 kHz output: CD quality only.
     host.send(json!({"jsonrpc": "2.0", "method": "output.changed", "params": {"max_rate": 48000, "max_bits": 24}})).await;
     let r = host.ok("track.resolve", json!({"ref": "track/77", "purpose": "preload"})).await;
@@ -837,13 +844,20 @@ async fn settings_and_play_reports() {
     let mut host = Host::spawn(&base);
     let init = host.initialize(&dir, json!({})).await;
     assert_eq!(init["capabilities"]["reporting"], true);
-    let declared: Vec<(&str, &str, bool)> = init["settings"]
+    let declared: Vec<(&str, &str, Value)> = init["settings"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|s| (s["key"].as_str().unwrap(), s["label"].as_str().unwrap(), s["default"].as_bool().unwrap()))
+        .map(|s| (s["key"].as_str().unwrap(), s["label"].as_str().unwrap(), s["default"].clone()))
         .collect();
-    assert_eq!(declared, [("report_playback", "Signaler les écoutes à Qobuz", true), ("cmaf", "Lecture chiffrée (CMAF)", false)]);
+    assert_eq!(
+        declared,
+        [
+            ("report_playback", "Signaler les écoutes à Qobuz", json!(true)),
+            ("cmaf", "Lecture chiffrée (CMAF)", json!(false)),
+            ("quality", "Qualité maximale", json!("hires-192")),
+        ]
+    );
 
     let wait_for = |path: &'static str, calls: Calls| async move {
         for _ in 0..100 {
@@ -998,6 +1012,13 @@ async fn cmaf_streams_through_the_relay() {
     let r = host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
     assert_eq!(r["delivery"], "direct");
     assert!(r["url"].as_str().unwrap().starts_with("https://cdn.test/"));
+
+    // MP3: plain URLs, CMAF carrying FLAC only.
+    format_ids(&calls);
+    host.send(json!({"jsonrpc": "2.0", "method": "settings.changed", "params": {"settings": {"cmaf": true, "quality": "mp3"}}})).await;
+    let r = host.ok("track.resolve", json!({"ref": "track/77", "purpose": "play"})).await;
+    assert_eq!(r["delivery"], "direct");
+    assert_eq!(format_ids(&calls), ["5"]);
 
     host.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);

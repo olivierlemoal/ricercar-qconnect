@@ -76,12 +76,12 @@ fn step_down(track_id: u32, asked: Quality, format_id: i32) -> Result<Quality, R
     got.fallback_chain().nth(1).ok_or_else(|| unavailable(format!("no format of track {track_id} fits the output")))
 }
 
-/// `track/getFileUrl`: a plain URL for the best quality `output` accepts,
-/// stepping down while the API hands out a format the DAC would have to
-/// convert.
-async fn direct(api: &ApiClient, track_id: u32, output: &Output) -> Result<Stream, RpcError> {
+/// `track/getFileUrl`: a plain URL for the best quality up to `max` that
+/// `output` accepts, stepping down while the API hands out a format the DAC
+/// would have to convert.
+async fn direct(api: &ApiClient, track_id: u32, output: &Output, max: Quality) -> Result<Stream, RpcError> {
     let mut api = api.clone();
-    let mut quality = output.max_quality();
+    let mut quality = max;
     loop {
         let s = api.get_stream_url(track_id, quality).await?;
         if s.sample {
@@ -107,9 +107,9 @@ async fn direct(api: &ApiClient, track_id: u32, output: &Output) -> Result<Strea
 
 /// `file/url`: encrypted CMAF segments, decrypted by the local relay and
 /// served as one FLAC file. FLAC formats only.
-async fn cmaf(api: &ApiClient, relay: &Relay, track_id: u32, output: &Output) -> Result<Stream, RpcError> {
+async fn cmaf(api: &ApiClient, relay: &Relay, track_id: u32, output: &Output, max: Quality) -> Result<Stream, RpcError> {
     let infos = api.session_infos().ok_or_else(|| unavailable("no streaming session for encrypted streaming"))?;
-    let mut quality = output.max_quality().max(Quality::Lossless);
+    let mut quality = max;
     loop {
         if quality == Quality::Mp3 {
             return Err(unavailable(format!("no FLAC format of track {track_id} fits the output")));
@@ -203,22 +203,25 @@ pub struct ForReport {
 }
 
 /// `relay`: fetch the stream as CMAF through it (setting `cmaf`); `None`:
-/// a plain `track/getFileUrl` URL.
+/// a plain `track/getFileUrl` URL. `cap`: the `quality` setting.
 pub async fn resolve(
     api: &ApiClient,
     reference: &str,
     output: &Output,
     relay: Option<&Relay>,
+    cap: Quality,
 ) -> Result<(Value, Resolved, ForReport), RpcError> {
     let id = reference
         .strip_prefix("track/")
         .and_then(|id| id.parse::<u32>().ok())
         .ok_or_else(|| RpcError::not_found(format!("{reference} is not a track")))?;
     let id_s = id.to_string();
+    let max = output.max_quality().min(cap);
     let stream = async {
         match relay {
-            Some(relay) => cmaf(api, relay, id, output).await,
-            None => direct(api, id, output).await,
+            // CMAF carries FLAC only.
+            Some(relay) if max > Quality::Mp3 => cmaf(api, relay, id, output, max).await,
+            _ => direct(api, id, output, max).await,
         }
     };
     let (stream, track) = tokio::join!(stream, api.track_get(&id_s));
@@ -284,7 +287,8 @@ mod tests {
         api.ensure_session().await.unwrap();
         let relay = Relay::default();
         let output = Output { max_rate: Some(48_000), max_bits: Some(24), rates: vec![] };
-        let (out, resolved, report) = resolve(&api, &format!("track/{}", env("QCONNECT_TRACK")), &output, Some(&relay)).await.unwrap();
+        let (out, resolved, report) =
+            resolve(&api, &format!("track/{}", env("QCONNECT_TRACK")), &output, Some(&relay), Quality::HiRes192).await.unwrap();
         assert_eq!(out["delivery"], "proxied");
         assert!(report.blob.is_some());
         let resp = reqwest::get(out["url"].as_str().unwrap()).await.unwrap();
